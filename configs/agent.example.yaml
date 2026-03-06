@@ -1,0 +1,102 @@
+# flora-agent configuration file
+
+# Server configuration
+server:
+  # flora-server URL
+  url: "https://api.flora.fan"
+
+  # Device authentication token (can also be set via FLORA_SERVER_DEVICE_TOKEN env var)
+  # If device_token is provided, it will be used directly.
+  # If not provided, the agent will try to use a stored token or register a new device.
+  device_token: "${FLORA_DEVICE_TOKEN}"
+
+  # Alternative: Register device automatically using user token
+  # This is used only if device_token is not set and no stored token exists.
+  # The device will be registered once and the token will be stored locally.
+  # user_token: "${FLORA_USER_TOKEN}"
+  # device_name: "my-robot"        # Optional: defaults to hostname
+  # device_type: "robot"           # Optional: defaults to "robot"
+
+# Directory monitoring configuration
+watch:
+  # Directories to watch for recording files
+  paths:
+    - /data/recordings
+    # - /home/robot/bags
+
+  # File pattern matching
+  patterns:
+    # File patterns to include (glob syntax)
+    include:
+      - "*.mcap"
+      - "*.bag"
+      - "*.db3"
+    # File patterns to exclude (glob syntax)
+    exclude:
+      - "*.active"      # Files being actively written
+      - "*.tmp"
+      - "*~"
+      - "*.part"
+
+  # Interval for periodic directory scans (reconciliation)
+  scan_interval: 30s
+
+  # Minimum file age before processing (avoid incomplete files)
+  min_file_age: 5s
+
+# Upload configuration
+upload:
+  # Enable/disable uploads
+  enabled: true
+  # Number of concurrent uploads
+  concurrent: 2
+  # Chunk size for multipart uploads (bytes)
+  chunk_size: 10485760  # 10MB
+  # Number of retry attempts for failed uploads
+  retry_attempts: 3
+  # Delay between retries
+  retry_delay: 5s
+  # Bandwidth limit (bytes/sec, 0 = unlimited)
+  bandwidth_limit: 0
+
+# Local storage configuration
+storage:
+  # SQLite database path for state persistence
+  db_path: /var/lib/flora-agent/agent.db
+
+# Prometheus metrics configuration (optional)
+metrics:
+  enabled: false
+  port: 9090
+  path: /metrics
+
+# Health check endpoint configuration
+health:
+  # Enable/disable health check HTTP endpoint
+  enabled: true
+  # Port for health check server
+  port: 8080
+  # Path for main health check endpoint
+  # Additional endpoints: /livez (liveness), /readyz (readiness)
+  path: /health
+
+# Logging configuration
+log:
+  # Log level: debug, info, warn, error
+  level: info
+  # Log format: json, text
+  format: json
+  # Output: stdout, file
+  output: stdout
+  # File path (only used when output is "file")
+  # file_path: /var/log/flora-agent/agent.log
+
+# Cleanup configuration (future feature)
+# cleanup:
+#   enabled: false
+#   # Cleanup policy: after_upload, by_age, by_size
+#   policy: after_upload
+#   # Maximum age of uploaded files before deletion
+#   max_age: 7d
+#   # Maximum total size of local files
+#   max_size: 100GB

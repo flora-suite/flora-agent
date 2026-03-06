@@ -1,0 +1,32 @@
+[Unit]
+Description=Flora Agent - Recording file sync agent
+Documentation=https://github.com/flora-suite/flora-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flora-agent
+Group=flora-agent
+ExecStart=/usr/local/bin/flora-agent run --config /etc/flora-agent/agent.yaml
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/lib/flora-agent /var/log/flora-agent
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flora-agent
+
+[Install]
+WantedBy=multi-user.target
