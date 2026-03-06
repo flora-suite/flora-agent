@@ -5,6 +5,8 @@
 
 Lightweight edge agent for syncing ROS recording files (MCAP, bag, db3) to [flora-server](../flora-server).
 
+> **WARNING:** This codebase is unstable and may undergo major changes. Do not use it in production.
+
 ## Features
 
 - 📁 **File Monitoring** - Real-time detection via fsnotify + periodic reconciliation
