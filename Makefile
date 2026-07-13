@@ -24,7 +24,7 @@ BINARY_DIR := bin
 MAIN_PKG := ./cmd/flora-agent
 
 .PHONY: all build clean test test-integration lint fmt vet tidy help
-.PHONY: build-linux build-darwin build-all
+.PHONY: build-linux build-darwin build-windows build-all
 .PHONY: install docker
 
 all: build
@@ -35,24 +35,27 @@ build: ## Build for current platform
 	$(GOBUILD) -ldflags "$(LDFLAGS)" -o $(BINARY_DIR)/$(BINARY_NAME) $(MAIN_PKG)
 
 build-linux-amd64: ## Build for Linux amd64
-	GOOS=linux GOARCH=amd64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-linux-amd64 $(MAIN_PKG)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-linux-amd64 $(MAIN_PKG)
 
 build-linux-arm64: ## Build for Linux arm64
-	GOOS=linux GOARCH=arm64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-linux-arm64 $(MAIN_PKG)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-linux-arm64 $(MAIN_PKG)
 
 build-linux-armv7: ## Build for Linux armv7
-	GOOS=linux GOARCH=arm GOARM=7 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-linux-armv7 $(MAIN_PKG)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-linux-armv7 $(MAIN_PKG)
 
 build-darwin-amd64: ## Build for macOS amd64
-	GOOS=darwin GOARCH=amd64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-darwin-amd64 $(MAIN_PKG)
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-darwin-amd64 $(MAIN_PKG)
 
-build-darwin-arm64: ## Build for macOS arm64 (M1/M2)
-	GOOS=darwin GOARCH=arm64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-darwin-arm64 $(MAIN_PKG)
+build-darwin-arm64: ## Build for macOS amd64/Apple Silicon
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-darwin-arm64 $(MAIN_PKG)
 
 build-windows-amd64: ## Build for Windows amd64
-	GOOS=windows GOARCH=amd64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-windows-amd64.exe $(MAIN_PKG)
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-windows-amd64.exe $(MAIN_PKG)
 
-build-all: build-linux-amd64 build-linux-arm64 build-linux-armv7 build-darwin-amd64 build-darwin-arm64 ## Build for all platforms
+build-windows-arm64: ## Build for Windows arm64
+	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 $(GOBUILD) -ldflags "$(LDFLAGS) -s -w" -o $(BINARY_DIR)/$(BINARY_NAME)-windows-arm64.exe $(MAIN_PKG)
+
+build-all: build-linux-amd64 build-linux-arm64 build-linux-armv7 build-darwin-amd64 build-darwin-arm64 build-windows-amd64 build-windows-arm64 ## Build for all platforms
 	@echo "Built binaries:"
 	@ls -la $(BINARY_DIR)/
 

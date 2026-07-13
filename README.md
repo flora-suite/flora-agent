@@ -21,15 +21,33 @@ Lightweight edge agent for syncing ROS recording files (MCAP, bag, db3) to [flor
 ### Installation
 
 ```bash
-# Download binary (Linux amd64)
-curl -Lo flora-agent https://github.com/flora-suite/flora-agent/releases/latest/download/flora-agent-linux-amd64
-chmod +x flora-agent
-sudo mv flora-agent /usr/local/bin/
+# Linux and macOS (amd64 or arm64)
+curl -fsSL https://raw.githubusercontent.com/flora-suite/flora-agent/main/scripts/install.sh | sh
+
+# Choose an installation directory (default: ~/.local/bin)
+curl -fsSL https://raw.githubusercontent.com/flora-suite/flora-agent/main/scripts/install.sh | INSTALL_DIR=/usr/local/bin sh
+
+# Homebrew (macOS and Linux)
+brew tap flora-suite/flora
+brew install flora-agent
 
 # Or build from source
 git clone https://github.com/flora-suite/flora-agent.git
 cd flora-agent
 make build
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/flora-suite/flora-agent/main/scripts/install.ps1 | iex
+```
+
+Windows users can also install it through Scoop after adding the Flora bucket:
+
+```powershell
+scoop bucket add flora-suite https://github.com/flora-suite/scoop-flora
+scoop install flora-agent
 ```
 
 ### Configuration
@@ -112,7 +130,7 @@ make docker-build    # Build Docker image
 |----------|-------------|--------|
 | Linux | amd64, arm64, armv7 | ✅ Primary |
 | macOS | amd64, arm64 | ✅ Supported |
-| Windows | amd64 | ⚠️ Experimental |
+| Windows | amd64, arm64 | ⚠️ Experimental |
 
 ## Supported File Formats
 
