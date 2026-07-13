@@ -23,7 +23,7 @@ BINARY_DIR := bin
 # Main package
 MAIN_PKG := ./cmd/flora-agent
 
-.PHONY: all build clean test lint fmt vet tidy help
+.PHONY: all build clean test test-integration lint fmt vet tidy help
 .PHONY: build-linux build-darwin build-all
 .PHONY: install docker
 
@@ -68,6 +68,9 @@ dev: ## Run with hot reload (requires air)
 
 test: ## Run tests
 	$(GOTEST) -v -race ./...
+
+test-integration: ## Run tagged integration tests
+	$(GOTEST) -v -race -tags=integration ./tests/integration
 
 test-cover: ## Run tests with coverage
 	$(GOTEST) -v -race -coverprofile=coverage.out ./...

@@ -13,7 +13,7 @@ Lightweight edge agent for syncing ROS recording files (MCAP, bag, db3) to [flor
 - ✅ **Validation** - MCAP/bag/db3 integrity checking with metadata extraction
 - ☁️ **Cloud Sync** - HTTP/2 upload with multipart support for large files
 - 💾 **State Persistence** - SQLite-backed for crash recovery and resume
-- 🔄 **Resumable Uploads** - Automatic retry and continuation after failures
+- 🔄 **Resumable Uploads** - Multipart continuation after interruption and fixed-cycle retry after failures
 - 📊 **Observability** - Prometheus metrics (optional)
 
 ## Quick Start
@@ -39,7 +39,7 @@ make build
 sudo mkdir -p /etc/flora-agent
 sudo cp configs/agent.example.yaml /etc/flora-agent/agent.yaml
 
-# Edit config - set your device token and watch paths
+# Edit config - set a device token (or a user token for first-run registration) and watch paths
 sudo vim /etc/flora-agent/agent.yaml
 ```
 
@@ -69,6 +69,7 @@ Key settings:
 |---------|--------------|-------------|
 | `server.url` | `FLORA_SERVER_URL` | flora-server URL |
 | `server.device_token` | `FLORA_SERVER_DEVICE_TOKEN` | Device authentication token |
+| `server.user_token` | `FLORA_SERVER_USER_TOKEN` | One-time registration token when no device token is stored |
 | `watch.paths` | `FLORA_WATCH_PATHS` | Directories to monitor |
 | `upload.chunk_size` | `FLORA_UPLOAD_CHUNK_SIZE` | Multipart chunk size (default 10MB) |
 
@@ -100,6 +101,7 @@ docker run -d \
 make build           # Build for current platform
 make build-all       # Build for all platforms
 make test            # Run tests
+make test-integration # Run tagged integration tests
 make lint            # Run linter
 make docker-build    # Build Docker image
 ```

@@ -52,11 +52,11 @@ upload:
   concurrent: 2
   # Chunk size for multipart uploads (bytes)
   chunk_size: 10485760  # 10MB
-  # Number of retry attempts for failed uploads
+  # Attempts for one HTTP operation, including the initial request
   retry_attempts: 3
-  # Delay between retries
+  # Fixed delay between attempts; files that still fail are retried on the next upload cycle
   retry_delay: 5s
-  # Bandwidth limit (bytes/sec, 0 = unlimited)
+  # Process-wide upload bandwidth limit (bytes/sec, 0 = unlimited)
   bandwidth_limit: 0
 
 # Local storage configuration

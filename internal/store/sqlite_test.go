@@ -107,6 +107,38 @@ func TestSQLiteStore_UpsertFile_Update(t *testing.T) {
 	assert.GreaterOrEqual(t, retrieved.UpdatedAt, originalUpdatedAt)
 }
 
+func TestSQLiteStore_UsesDistinctIDsForSameBasename(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+
+	first := &File{Path: "/data/one/recording.mcap", Size: 1, MTime: 1, State: StateDiscovered}
+	second := &File{Path: "/data/two/recording.mcap", Size: 1, MTime: 1, State: StateDiscovered}
+	require.NoError(t, store.UpsertFile(first))
+	require.NoError(t, store.UpsertFile(second))
+	assert.NotEqual(t, first.ID, second.ID)
+}
+
+func TestSQLiteStore_MigratesIncompleteUploadsToDiscovery(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+
+	file := &File{ID: "recording.mcap", Path: "/data/recording.mcap", Size: 1, MTime: 1, State: StateUploading, UploadID: "upload-1"}
+	require.NoError(t, store.UpsertFile(file))
+	require.NoError(t, store.UpsertChunk(&UploadChunk{FileID: file.ID, ChunkIndex: 0, Size: 1, Uploaded: true}))
+	_, err := store.db.Exec("DELETE FROM config WHERE key = 'schema_version'")
+	require.NoError(t, err)
+
+	require.NoError(t, store.migratePathIDs())
+	migrated, err := store.GetFile(file.Path)
+	require.NoError(t, err)
+	require.Equal(t, StateDiscovered, migrated.State)
+	assert.Empty(t, migrated.UploadID)
+	assert.Equal(t, generateID(file.Path), migrated.ID)
+	chunks, err := store.GetChunks(migrated.ID)
+	require.NoError(t, err)
+	assert.Empty(t, chunks)
+}
+
 func TestSQLiteStore_UpsertFile_WithMetadata(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()

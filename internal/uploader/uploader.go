@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -34,11 +35,12 @@ type ResumableUploader interface {
 
 // HTTPUploader implements Uploader using HTTP.
 type HTTPUploader struct {
-	client      *api.Client
-	concurrent  int
-	chunkSize   int64
-	log         zerolog.Logger
-	retryCfg    retry.Config
+	client     *api.Client
+	concurrent int
+	chunkSize  int64
+	log        zerolog.Logger
+	retryCfg   retry.Config
+	limiter    *bandwidthLimiter
 }
 
 // Option configures the uploader.
@@ -49,6 +51,47 @@ func WithRetryConfig(cfg retry.Config) Option {
 	return func(u *HTTPUploader) {
 		u.retryCfg = cfg
 	}
+}
+
+// WithBandwidthLimit limits aggregate payload dispatch across uploader workers.
+// A limit of zero leaves uploads unrestricted.
+func WithBandwidthLimit(bytesPerSecond int64) Option {
+	return func(u *HTTPUploader) {
+		if bytesPerSecond > 0 {
+			u.limiter = &bandwidthLimiter{bytesPerSecond: bytesPerSecond}
+		}
+	}
+}
+
+type bandwidthLimiter struct {
+	mu             sync.Mutex
+	bytesPerSecond int64
+	next           time.Time
+}
+
+func (l *bandwidthLimiter) Wait(ctx context.Context, size int64) error {
+	if l == nil || size <= 0 {
+		return nil
+	}
+	l.mu.Lock()
+	now := time.Now()
+	if l.next.Before(now) {
+		l.next = now
+	}
+	start := l.next
+	l.next = l.next.Add(time.Duration(float64(size) / float64(l.bytesPerSecond) * float64(time.Second)))
+	l.mu.Unlock()
+
+	if delay := time.Until(start); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil
 }
 
 // New creates a new HTTPUploader.
@@ -99,6 +142,10 @@ func (u *HTTPUploader) Upload(ctx context.Context, file *store.File) error {
 func (u *HTTPUploader) simpleUpload(ctx context.Context, file *store.File, r io.Reader) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
+		return err
+	}
+
+	if err := u.waitForBandwidth(ctx, int64(len(data))); err != nil {
 		return err
 	}
 
@@ -312,6 +359,9 @@ func (u *HTTPUploader) resumableMultipartUpload(ctx context.Context, file *store
 			return fmt.Errorf("failed to read chunk %d: %w", i, err)
 		}
 		chunk = chunk[:n]
+		if err := u.waitForBandwidth(ctx, int64(len(chunk))); err != nil {
+			return err
+		}
 
 		// Upload chunk with retry
 		var chunkResp *api.UploadChunkResponse
@@ -487,6 +537,10 @@ func (u *HTTPUploader) multipartUpload(ctx context.Context, file *store.File, f 
 			return fmt.Errorf("failed to read chunk %d: %w", i, err)
 		}
 		chunk = chunk[:n]
+		if err := u.waitForBandwidth(ctx, int64(len(chunk))); err != nil {
+			_ = u.client.AbortMultipartUpload(context.Background(), initResp.UploadID)
+			return err
+		}
 
 		// Upload chunk with retry
 		var chunkResp *api.UploadChunkResponse
@@ -551,6 +605,10 @@ func (u *HTTPUploader) multipartUpload(ctx context.Context, file *store.File, f 
 		Msg("multipart upload completed")
 
 	return nil
+}
+
+func (u *HTTPUploader) waitForBandwidth(ctx context.Context, size int64) error {
+	return u.limiter.Wait(ctx, size)
 }
 
 func convertMetadata(m *store.FileMetadata) *api.RecordingMetadata {

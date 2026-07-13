@@ -2,7 +2,9 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -107,6 +109,11 @@ func NewSQLite(dbPath string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The agent coordinates concurrent upload workers through a single local
+	// state database. Serializing SQLite access prevents transient write-lock
+	// failures while preserving durable state transitions.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	store := &SQLiteStore{db: db}
 	if err := store.migrate(); err != nil {
@@ -153,8 +160,68 @@ func (s *SQLiteStore) migrate() error {
 		value TEXT NOT NULL
 	);
 	`
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+
+	return s.migratePathIDs()
+}
+
+// migratePathIDs moves older basename-based IDs to stable path hashes. Incomplete
+// uploads are deliberately restarted because their server-side sessions cannot be
+// safely associated with a changed local ID.
+func (s *SQLiteStore) migratePathIDs() error {
+	version, err := s.GetConfig("schema_version")
+	if err != nil || version == "2" {
+		return err
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query("SELECT id, path, state FROM files")
+	if err != nil {
+		return err
+	}
+	type record struct {
+		id, path string
+		state    FileState
+	}
+	var records []record
+	for rows.Next() {
+		var r record
+		if err := rows.Scan(&r.id, &r.path, &r.state); err != nil {
+			rows.Close()
+			return err
+		}
+		records = append(records, r)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec("DELETE FROM upload_chunks"); err != nil {
+		return err
+	}
+	for _, r := range records {
+		state := r.state
+		if state != StateUploaded {
+			state = StateDiscovered
+		}
+		if _, err := tx.Exec(
+			"UPDATE files SET id = ?, state = ?, upload_id = NULL, error_message = NULL WHERE path = ?",
+			generateID(r.path), state, r.path,
+		); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec("INSERT INTO config (key, value) VALUES ('schema_version', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetFile retrieves a file by path.
@@ -376,9 +443,13 @@ func (s *SQLiteStore) Close() error {
 // Helper functions
 
 func generateID(path string) string {
-	// Simple hash for ID generation
-	// In production, use a proper hash function
-	return filepath.Base(path)
+	absPath, err := filepath.Abs(path)
+	if err == nil {
+		path = absPath
+	}
+	cleanPath := filepath.Clean(path)
+	sum := sha256.Sum256([]byte(cleanPath))
+	return hex.EncodeToString(sum[:])
 }
 
 func nullString(s string) sql.NullString {
