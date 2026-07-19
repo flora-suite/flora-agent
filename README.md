@@ -125,6 +125,7 @@ make build           # Build for current platform
 make build-all       # Build for all platforms
 make test            # Run tests
 make test-integration # Run tagged integration tests
+make test-e2e         # Run CLI-to-server end-to-end tests
 make lint            # Run linter
 make docker-build    # Build Docker image
 ```

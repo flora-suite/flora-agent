@@ -23,7 +23,7 @@ BINARY_DIR := bin
 # Main package
 MAIN_PKG := ./cmd/flora-agent
 
-.PHONY: all build clean test test-integration lint fmt vet tidy help
+.PHONY: all build clean test test-integration test-e2e lint fmt vet tidy help
 .PHONY: build-linux build-darwin build-windows build-all
 .PHONY: install docker
 
@@ -74,6 +74,9 @@ test: ## Run tests
 
 test-integration: ## Run tagged integration tests
 	$(GOTEST) -v -race -tags=integration ./tests/integration
+
+test-e2e: ## Run end-to-end tests against a mock flora-server
+	$(GOTEST) -v -race -tags=e2e ./tests/e2e
 
 test-cover: ## Run tests with coverage
 	$(GOTEST) -v -race -coverprofile=coverage.out ./...
