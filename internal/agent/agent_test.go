@@ -3,8 +3,15 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,7 +69,7 @@ func TestResolveDeviceToken_FromConfig(t *testing.T) {
 	// Use a mock store that doesn't have any stored token
 	st := &mockStore{}
 
-	token, err := resolveDeviceToken(context.Background(), cfg, st, log)
+	token, err := ResolveDeviceToken(context.Background(), cfg, st, log)
 	require.NoError(t, err)
 	assert.Equal(t, "test-token-from-config", token)
 }
@@ -82,7 +89,7 @@ func TestResolveDeviceToken_FromStore(t *testing.T) {
 		},
 	}
 
-	token, err := resolveDeviceToken(context.Background(), cfg, st, log)
+	token, err := ResolveDeviceToken(context.Background(), cfg, st, log)
 	require.NoError(t, err)
 	assert.Equal(t, "stored-device-token", token)
 }
@@ -97,7 +104,7 @@ func TestResolveDeviceToken_NoToken(t *testing.T) {
 
 	st := &mockStore{}
 
-	_, err := resolveDeviceToken(context.Background(), cfg, st, log)
+	_, err := ResolveDeviceToken(context.Background(), cfg, st, log)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no device token configured")
 }
@@ -253,6 +260,197 @@ func TestAgent_HealthCheck(t *testing.T) {
 	// Clean up
 	err = agent.Shutdown()
 	assert.NoError(t, err)
+}
+
+func TestAgent_ProcessFileMarksInvalidResultInvalid(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "broken.mcap")
+	require.NoError(t, os.WriteFile(path, []byte("not an mcap"), 0644))
+
+	cfg := DefaultConfig()
+	cfg.Server.DeviceToken = "test-token"
+	cfg.Storage.DBPath = filepath.Join(tmpDir, "agent.db")
+	cfg.Watch.Paths = []string{tmpDir}
+	cfg.Watch.MinFileAge = 0
+	log := zerolog.Nop()
+	a, err := New(cfg, log)
+	require.NoError(t, err)
+	defer a.Shutdown()
+
+	require.NoError(t, a.processFile(path))
+	file, err := a.store.GetFile(path)
+	require.NoError(t, err)
+	require.NotNil(t, file)
+	assert.Equal(t, store.StateInvalid, file.State)
+	assert.NotEmpty(t, file.ErrorMessage)
+}
+
+func TestAgent_ProcessFilePreservesUnchangedMultipartState(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "recording.mcap")
+	require.NoError(t, os.WriteFile(path, []byte("not an mcap"), 0644))
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Server.DeviceToken = "test-token"
+	cfg.Storage.DBPath = filepath.Join(tmpDir, "agent.db")
+	cfg.Watch.Paths = []string{tmpDir}
+	cfg.Watch.MinFileAge = 0
+	a, err := New(cfg, zerolog.Nop())
+	require.NoError(t, err)
+	defer a.Shutdown()
+
+	existing := &store.File{Path: path, Size: info.Size(), MTime: info.ModTime().Unix(), State: store.StateUploading, UploadID: "upload-1"}
+	require.NoError(t, a.store.UpsertFile(existing))
+	require.NoError(t, a.store.UpsertChunk(&store.UploadChunk{FileID: existing.ID, ChunkIndex: 0, Size: 1, Uploaded: true, ETag: "etag"}))
+	require.NoError(t, a.processFile(path))
+
+	file, err := a.store.GetFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "upload-1", file.UploadID)
+	chunks, err := a.store.GetChunks(file.ID)
+	require.NoError(t, err)
+	assert.Len(t, chunks, 1)
+}
+
+func TestAgent_ApplyRemoteConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/agent/config", r.URL.Path)
+		json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+			"uploadChunkSize":      2048,
+			"maxConcurrentUploads": 3,
+			"heartbeatInterval":    15,
+			"allowedFileTypes":     []string{".mcap"},
+			"maxFileSize":          4096,
+		}})
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.Server.URL = server.URL
+	cfg.Server.DeviceToken = "token"
+	cfg.Storage.DBPath = filepath.Join(tmpDir, "agent.db")
+	cfg.Watch.Paths = []string{tmpDir}
+	a, err := New(cfg, zerolog.Nop())
+	require.NoError(t, err)
+	defer a.Shutdown()
+
+	a.applyRemoteConfig()
+	assert.Equal(t, int64(2048), a.config.Upload.ChunkSize)
+	assert.Equal(t, 3, a.config.Upload.Concurrent)
+	assert.Equal(t, 15*time.Second, a.heartbeatInterval)
+	assert.Equal(t, int64(4096), a.maxFileSize)
+	_, allowed := a.allowedFileTypes[".mcap"]
+	assert.True(t, allowed)
+}
+
+func TestAgent_ApplyRemoteConfigFallsBackToLocalValues(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.Server.URL = server.URL
+	cfg.Server.DeviceToken = "token"
+	cfg.Storage.DBPath = filepath.Join(tmpDir, "agent.db")
+	cfg.Watch.Paths = []string{tmpDir}
+	cfg.Upload.ChunkSize = 1024
+	a, err := New(cfg, zerolog.Nop())
+	require.NoError(t, err)
+	defer a.Shutdown()
+
+	a.applyRemoteConfig()
+	assert.Equal(t, int64(1024), a.config.Upload.ChunkSize)
+	assert.Equal(t, 30*time.Second, a.heartbeatInterval)
+}
+
+func TestAgent_RetriesFailedFilesOnSubsequentCycles(t *testing.T) {
+	a := newUploadTestAgent(t, 1)
+	defer a.Shutdown()
+	u := &recordingUploader{err: errors.New("temporary upload failure")}
+	a.uploader = u
+	file := &store.File{Path: "/data/failed.mcap", Size: 1, MTime: 1, State: store.StateFailed}
+	require.NoError(t, a.store.UpsertFile(file))
+
+	a.processUploads()
+	a.processUploads()
+	assert.Equal(t, int32(2), u.calls.Load())
+	recorded, err := a.store.GetFile(file.Path)
+	require.NoError(t, err)
+	assert.Equal(t, store.StateFailed, recorded.State)
+}
+
+func TestAgent_ProcessUploadsRespectsConcurrency(t *testing.T) {
+	a := newUploadTestAgent(t, 2)
+	defer a.Shutdown()
+	u := &recordingUploader{delay: 30 * time.Millisecond}
+	a.uploader = u
+	for i := 0; i < 3; i++ {
+		file := &store.File{Path: fmt.Sprintf("/data/%d.mcap", i), Size: 1, MTime: 1, State: store.StateValidated}
+		require.NoError(t, a.store.UpsertFile(file))
+	}
+
+	a.processUploads()
+	assert.Equal(t, int32(3), u.calls.Load())
+	assert.GreaterOrEqual(t, u.maxActive.Load(), int32(2))
+	assert.LessOrEqual(t, u.maxActive.Load(), int32(2))
+}
+
+func TestAgent_HealthReflectsHeartbeatAndWatcherState(t *testing.T) {
+	a := newUploadTestAgent(t, 1)
+	defer a.Shutdown()
+	a.registerHealthCheckers()
+	a.statusMu.Lock()
+	a.watcherStarted = true
+	a.lastHeartbeatErr = errors.New("heartbeat unavailable")
+	a.statusMu.Unlock()
+	assert.Equal(t, "degraded", string(a.HealthCheck().Status))
+
+	a.statusMu.Lock()
+	a.watcherStarted = false
+	a.statusMu.Unlock()
+	assert.Equal(t, "unhealthy", string(a.HealthCheck().Status))
+}
+
+func newUploadTestAgent(t *testing.T, concurrent int) *Agent {
+	t.Helper()
+	tmpDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.Server.DeviceToken = "token"
+	cfg.Storage.DBPath = filepath.Join(tmpDir, "agent.db")
+	cfg.Watch.Paths = []string{tmpDir}
+	cfg.Upload.Concurrent = concurrent
+	a, err := New(cfg, zerolog.Nop())
+	require.NoError(t, err)
+	return a
+}
+
+type recordingUploader struct {
+	err       error
+	delay     time.Duration
+	calls     atomic.Int32
+	active    atomic.Int32
+	maxActive atomic.Int32
+	mu        sync.Mutex
+}
+
+func (u *recordingUploader) Upload(_ context.Context, _ *store.File) error {
+	u.calls.Add(1)
+	active := u.active.Add(1)
+	u.mu.Lock()
+	if active > u.maxActive.Load() {
+		u.maxActive.Store(active)
+	}
+	u.mu.Unlock()
+	defer u.active.Add(-1)
+	if u.delay > 0 {
+		time.Sleep(u.delay)
+	}
+	return u.err
 }
 
 // mockStore implements store.Store interface for testing

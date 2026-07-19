@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/flora-suite/flora-agent/internal/api"
 	"github.com/flora-suite/flora-agent/internal/health"
 	"github.com/flora-suite/flora-agent/internal/metrics"
+	"github.com/flora-suite/flora-agent/internal/retry"
 	"github.com/flora-suite/flora-agent/internal/store"
 	"github.com/flora-suite/flora-agent/internal/sysinfo"
 	"github.com/flora-suite/flora-agent/internal/uploader"
@@ -36,6 +39,13 @@ type Agent struct {
 	uploader  uploader.Uploader
 	sysinfo   *sysinfo.Collector
 	health    *health.Handler
+
+	heartbeatInterval time.Duration
+	allowedFileTypes  map[string]struct{}
+	maxFileSize       int64
+	statusMu          sync.RWMutex
+	watcherStarted    bool
+	lastHeartbeatErr  error
 
 	metricsServer *http.Server
 	healthServer  *http.Server
@@ -57,7 +67,7 @@ func New(cfg *Config, log zerolog.Logger) (*Agent, error) {
 	}
 
 	// Resolve device token (from config, stored, or registration)
-	deviceToken, err := resolveDeviceToken(ctx, cfg, st, log)
+	deviceToken, err := ResolveDeviceToken(ctx, cfg, st, log)
 	if err != nil {
 		cancel()
 		st.Close()
@@ -78,7 +88,7 @@ func New(cfg *Config, log zerolog.Logger) (*Agent, error) {
 	v := validator.New(log)
 
 	// Initialize uploader
-	u := uploader.New(client, cfg.Upload.Concurrent, cfg.Upload.ChunkSize, log)
+	u := newUploader(client, cfg, log)
 
 	// Initialize sysinfo collector
 	sys := sysinfo.NewCollector()
@@ -87,23 +97,54 @@ func New(cfg *Config, log zerolog.Logger) (*Agent, error) {
 	h := health.NewHandler()
 
 	return &Agent{
-		config:    cfg,
-		log:       log,
-		store:     st,
-		client:    client,
-		watcher:   w,
-		validator: v,
-		uploader:  u,
-		sysinfo:   sys,
-		health:    h,
-		ctx:       ctx,
-		cancel:    cancel,
+		config:            cfg,
+		log:               log,
+		store:             st,
+		client:            client,
+		watcher:           w,
+		validator:         v,
+		uploader:          u,
+		sysinfo:           sys,
+		health:            h,
+		heartbeatInterval: 30 * time.Second,
+		allowedFileTypes:  allowedTypes(cfg.Watch.Patterns.Include),
+		ctx:               ctx,
+		cancel:            cancel,
 	}, nil
+}
+
+func newUploader(client *api.Client, cfg *Config, log zerolog.Logger) *uploader.HTTPUploader {
+	retryCfg := retryConfig(cfg)
+	return uploader.New(client, cfg.Upload.Concurrent, cfg.Upload.ChunkSize, log,
+		uploader.WithRetryConfig(retryCfg),
+		uploader.WithBandwidthLimit(cfg.Upload.BandwidthLimit),
+	)
+}
+
+func retryConfig(cfg *Config) retry.Config {
+	return retry.Config{
+		MaxAttempts:  cfg.Upload.RetryAttempts,
+		InitialDelay: cfg.Upload.RetryDelay,
+		MaxDelay:     cfg.Upload.RetryDelay,
+		Multiplier:   1,
+		Jitter:       0,
+	}
+}
+
+func allowedTypes(patterns []string) map[string]struct{} {
+	allowed := make(map[string]struct{}, len(patterns))
+	for _, pattern := range patterns {
+		if strings.HasPrefix(pattern, "*.") {
+			allowed[strings.TrimPrefix(pattern, "*")] = struct{}{}
+		}
+	}
+	return allowed
 }
 
 // resolveDeviceToken determines the device token to use.
 // Priority: 1) Config device_token, 2) Stored token, 3) Register new device
-func resolveDeviceToken(ctx context.Context, cfg *Config, st store.Store, log zerolog.Logger) (string, error) {
+// ResolveDeviceToken determines the device token to use.
+func ResolveDeviceToken(ctx context.Context, cfg *Config, st store.Store, log zerolog.Logger) (string, error) {
 	// 1. Check if token is provided in config
 	if cfg.Server.DeviceToken != "" {
 		log.Debug().Msg("using device token from config")
@@ -215,6 +256,7 @@ func getMachineID() string {
 // Run starts the agent and blocks until shutdown.
 func (a *Agent) Run() error {
 	a.log.Info().Msg("starting flora-agent")
+	a.applyRemoteConfig()
 
 	// Initialize metrics
 	metrics.Init()
@@ -262,6 +304,34 @@ func (a *Agent) Run() error {
 	}
 
 	return a.Shutdown()
+}
+
+func (a *Agent) applyRemoteConfig() {
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+	defer cancel()
+	remote, err := a.client.GetConfig(ctx)
+	if err != nil {
+		a.log.Warn().Err(err).Msg("failed to load remote agent configuration; using local configuration")
+		return
+	}
+	if remote.UploadChunkSize > 0 {
+		a.config.Upload.ChunkSize = remote.UploadChunkSize
+	}
+	if remote.MaxConcurrentUploads > 0 {
+		a.config.Upload.Concurrent = remote.MaxConcurrentUploads
+	}
+	if remote.HeartbeatInterval > 0 {
+		a.heartbeatInterval = time.Duration(remote.HeartbeatInterval) * time.Second
+	}
+	if len(remote.AllowedFileTypes) > 0 {
+		a.allowedFileTypes = make(map[string]struct{}, len(remote.AllowedFileTypes))
+		for _, extension := range remote.AllowedFileTypes {
+			a.allowedFileTypes[strings.ToLower(extension)] = struct{}{}
+		}
+	}
+	a.maxFileSize = remote.MaxFileSize
+	a.uploader = newUploader(a.client, a.config, a.log)
+	a.log.Info().Msg("loaded remote agent configuration")
 }
 
 // Shutdown gracefully stops the agent.
@@ -323,7 +393,7 @@ func (a *Agent) startMetricsServer() {
 func (a *Agent) heartbeatLoop() {
 	defer a.wg.Done()
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(a.heartbeatInterval)
 	defer ticker.Stop()
 
 	// Send initial heartbeat
@@ -377,6 +447,9 @@ func (a *Agent) sendHeartbeat() error {
 	}
 
 	_, err = a.client.Heartbeat(a.ctx, status)
+	a.statusMu.Lock()
+	a.lastHeartbeatErr = err
+	a.statusMu.Unlock()
 	if err != nil {
 		metrics.HeartbeatFailed.Inc()
 	} else {
@@ -393,9 +466,15 @@ func (a *Agent) watchLoop() {
 	errors := a.watcher.Errors()
 
 	if err := a.watcher.Start(); err != nil {
+		a.statusMu.Lock()
+		a.watcherStarted = false
+		a.statusMu.Unlock()
 		a.log.Error().Err(err).Msg("failed to start watcher")
 		return
 	}
+	a.statusMu.Lock()
+	a.watcherStarted = true
+	a.statusMu.Unlock()
 	defer a.watcher.Stop()
 
 	for {
@@ -474,10 +553,6 @@ func (a *Agent) processFile(path string) error {
 	if err != nil {
 		return err
 	}
-	if existing != nil && existing.State == store.StateUploaded {
-		return nil // Already uploaded
-	}
-
 	// Check file age (avoid processing files still being written)
 	info, err := os.Stat(path)
 	if err != nil {
@@ -488,16 +563,29 @@ func (a *Agent) processFile(path string) error {
 		return nil
 	}
 
-	// Track if this is a new discovery
+	mtime := info.ModTime().Unix()
 	isNewFile := existing == nil
-
-	// Add or update file in store
-	file := &store.File{
-		Path:  path,
-		Size:  info.Size(),
-		MTime: info.ModTime().Unix(),
-		State: store.StateDiscovered,
+	file := existing
+	if existing != nil && existing.Size == info.Size() && existing.MTime == mtime {
+		if existing.State == store.StateUploaded || existing.State == store.StateValidated || existing.State == store.StateUploading || existing.State == store.StateFailed {
+			return nil
+		}
 	}
+	if existing == nil {
+		file = &store.File{Path: path}
+	} else if existing.Size != info.Size() || existing.MTime != mtime {
+		if err := a.store.DeleteChunks(existing.ID); err != nil {
+			return err
+		}
+		file.UploadID = ""
+		file.Metadata = nil
+		file.Checksum = ""
+		file.FileType = ""
+		file.ErrorMessage = ""
+	}
+	file.Size = info.Size()
+	file.MTime = mtime
+	file.State = store.StateDiscovered
 	if err := a.store.UpsertFile(file); err != nil {
 		return err
 	}
@@ -508,15 +596,34 @@ func (a *Agent) processFile(path string) error {
 		metrics.FileSize.Observe(float64(info.Size()))
 	}
 
+	if a.maxFileSize > 0 && file.Size > a.maxFileSize {
+		file.State = store.StateInvalid
+		file.ErrorMessage = fmt.Sprintf("file size %d exceeds server maximum %d", file.Size, a.maxFileSize)
+		return a.store.UpsertFile(file)
+	}
+	if len(a.allowedFileTypes) > 0 {
+		if _, ok := a.allowedFileTypes[strings.ToLower(filepath.Ext(path))]; !ok {
+			file.State = store.StateInvalid
+			file.ErrorMessage = "file type is not allowed by server configuration"
+			return a.store.UpsertFile(file)
+		}
+	}
+
 	// Validate the file
 	validationStart := time.Now()
 	result, err := a.validator.Validate(path)
 	validationDuration := time.Since(validationStart).Seconds()
 
-	if err != nil {
+	if err != nil || !result.Valid {
 		metrics.RecordValidation(false, validationDuration)
 		file.State = store.StateInvalid
-		file.ErrorMessage = err.Error()
+		if err != nil {
+			file.ErrorMessage = err.Error()
+		} else if result.Error != nil {
+			file.ErrorMessage = result.Error.Error()
+		} else {
+			file.ErrorMessage = "file validation failed"
+		}
 		return a.store.UpsertFile(file)
 	}
 
@@ -554,7 +661,7 @@ func (a *Agent) processUploads() {
 		return
 	}
 
-	// Get both validated files (new uploads) and uploading files (resume interrupted uploads)
+	// Get validated files, interrupted uploads, and failures for fixed-cycle retry.
 	validatedFiles, err := a.store.GetFilesByState(store.StateValidated)
 	if err != nil {
 		a.log.Error().Err(err).Msg("failed to get validated files for upload")
@@ -567,67 +674,99 @@ func (a *Agent) processUploads() {
 		return
 	}
 
-	// Combine lists, with uploading files first (resume takes priority)
+	failedFiles, err := a.store.GetFilesByState(store.StateFailed)
+	if err != nil {
+		a.log.Error().Err(err).Msg("failed to get failed files for retry")
+		return
+	}
+
+	// Resume takes priority, followed by new uploads and fixed-cycle retries.
 	files := append(uploadingFiles, validatedFiles...)
+	files = append(files, failedFiles...)
 
-	// Check if uploader supports resumable uploads
-	resumableUploader, isResumable := a.uploader.(uploader.ResumableUploader)
-
+	workers := a.config.Upload.Concurrent
+	if workers < 1 {
+		workers = 1
+	}
+	jobs := make(chan *store.File)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for file := range jobs {
+				a.processUpload(file)
+			}
+		}()
+	}
 	for _, file := range files {
 		select {
 		case <-a.ctx.Done():
+			close(jobs)
+			wg.Wait()
 			return
-		default:
+		case jobs <- file:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func (a *Agent) processUpload(file *store.File) {
+	select {
+	case <-a.ctx.Done():
+		return
+	default:
+	}
+
+	// Track if this is a resume or new upload.
+	isResume := file.State == store.StateUploading
+
+	if !isResume {
+		wasValidated := file.State == store.StateValidated
+		file.State = store.StateUploading
+		if err := a.store.UpsertFile(file); err != nil {
+			return
 		}
 
-		// Track if this is a resume or new upload
-		isResume := file.State == store.StateUploading
-
-		if !isResume {
-			file.State = store.StateUploading
-			if err := a.store.UpsertFile(file); err != nil {
-				continue
-			}
-
-			// Track uploading files
+		if wasValidated {
 			metrics.PendingFiles.Dec()
 		}
-		metrics.UploadingFiles.Inc()
+	}
+	metrics.UploadingFiles.Inc()
 
-		uploadStart := time.Now()
-		var uploadErr error
+	uploadStart := time.Now()
+	var uploadErr error
 
-		if isResumable {
-			uploadErr = resumableUploader.UploadWithStore(a.ctx, file, a.store)
-		} else {
-			uploadErr = a.uploader.Upload(a.ctx, file)
-		}
-		uploadDuration := time.Since(uploadStart).Seconds()
+	if resumableUploader, ok := a.uploader.(uploader.ResumableUploader); ok {
+		uploadErr = resumableUploader.UploadWithStore(a.ctx, file, a.store)
+	} else {
+		uploadErr = a.uploader.Upload(a.ctx, file)
+	}
+	uploadDuration := time.Since(uploadStart).Seconds()
 
-		// Decrease uploading count
-		metrics.UploadingFiles.Dec()
+	metrics.UploadingFiles.Dec()
 
-		if uploadErr != nil {
-			a.log.Error().Err(uploadErr).Str("path", file.Path).Bool("resume", isResume).Msg("upload failed")
-			metrics.RecordUpload(false, file.Size, uploadDuration)
+	if uploadErr != nil {
+		a.log.Error().Err(uploadErr).Str("path", file.Path).Bool("resume", isResume).Msg("upload failed")
+		metrics.RecordUpload(false, file.Size, uploadDuration)
 
-			// Check if it's a context cancellation (agent shutting down) - keep as uploading for resume
-			if a.ctx.Err() != nil {
-				a.log.Info().Str("path", file.Path).Msg("upload interrupted, will resume later")
-				return
-			}
-
-			file.State = store.StateFailed
-			file.ErrorMessage = uploadErr.Error()
-		} else {
-			a.log.Info().Str("path", file.Path).Bool("resume", isResume).Msg("upload completed")
-			metrics.RecordUpload(true, file.Size, uploadDuration)
-			file.State = store.StateUploaded
+		if a.ctx.Err() != nil {
+			a.log.Info().Str("path", file.Path).Msg("upload interrupted, will resume later")
+			return
 		}
 
-		if err := a.store.UpsertFile(file); err != nil {
-			a.log.Error().Err(err).Msg("failed to update file state")
-		}
+		file.State = store.StateFailed
+		file.ErrorMessage = uploadErr.Error()
+	} else {
+		a.log.Info().Str("path", file.Path).Bool("resume", isResume).Msg("upload completed")
+		metrics.RecordUpload(true, file.Size, uploadDuration)
+		file.State = store.StateUploaded
+		file.ErrorMessage = ""
+	}
+
+	if err := a.store.UpsertFile(file); err != nil {
+		a.log.Error().Err(err).Msg("failed to update file state")
 	}
 }
 
@@ -647,18 +786,27 @@ func (a *Agent) registerHealthCheckers() {
 		}
 	})
 
-	// Server connectivity check
 	a.health.RegisterChecker("server", func() health.ComponentStatus {
-		// We consider server healthy if last heartbeat was successful
-		// For now, just mark as healthy since we're running
+		a.statusMu.RLock()
+		err := a.lastHeartbeatErr
+		a.statusMu.RUnlock()
+		if err != nil {
+			return health.ComponentStatus{Status: health.StatusDegraded, Message: err.Error()}
+		}
 		return health.ComponentStatus{
 			Status:  health.StatusHealthy,
-			Message: "configured",
+			Message: "heartbeat healthy",
 		}
 	})
 
 	// Watcher health check
 	a.health.RegisterChecker("watcher", func() health.ComponentStatus {
+		a.statusMu.RLock()
+		started := a.watcherStarted
+		a.statusMu.RUnlock()
+		if !started {
+			return health.ComponentStatus{Status: health.StatusUnhealthy, Message: "watcher is not running"}
+		}
 		return health.ComponentStatus{
 			Status:  health.StatusHealthy,
 			Message: fmt.Sprintf("watching %d paths", len(a.config.Watch.Paths)),

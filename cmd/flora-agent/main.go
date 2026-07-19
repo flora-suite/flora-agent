@@ -4,7 +4,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/flora-suite/flora-agent/internal/agent"
 	"github.com/flora-suite/flora-agent/internal/api"
 	"github.com/flora-suite/flora-agent/internal/register"
+	"github.com/flora-suite/flora-agent/internal/retry"
 	"github.com/flora-suite/flora-agent/internal/store"
 	"github.com/flora-suite/flora-agent/internal/uploader"
 	"github.com/flora-suite/flora-agent/internal/validator"
@@ -153,12 +156,16 @@ func initConfig() {
 	viper.SetDefault("upload.retry_attempts", defaults.Upload.RetryAttempts)
 	viper.SetDefault("upload.retry_delay", defaults.Upload.RetryDelay)
 	viper.SetDefault("storage.db_path", defaults.Storage.DBPath)
+	viper.SetDefault("health.enabled", defaults.Health.Enabled)
+	viper.SetDefault("health.port", defaults.Health.Port)
+	viper.SetDefault("health.path", defaults.Health.Path)
 	viper.SetDefault("metrics.enabled", defaults.Metrics.Enabled)
 	viper.SetDefault("metrics.port", defaults.Metrics.Port)
 	viper.SetDefault("metrics.path", defaults.Metrics.Path)
 	viper.SetDefault("log.level", defaults.Log.Level)
 	viper.SetDefault("log.format", defaults.Log.Format)
 	viper.SetDefault("log.output", defaults.Log.Output)
+	viper.SetDefault("log.file_path", defaults.Log.FilePath)
 
 	// Read config file
 	if err := viper.ReadInConfig(); err != nil {
@@ -176,11 +183,26 @@ func loadConfig() (*agent.Config, error) {
 	return &cfg, nil
 }
 
-func setupLogger(cfg *agent.Config) zerolog.Logger {
+func setupLogger(cfg *agent.Config) (zerolog.Logger, io.Closer, error) {
 	var log zerolog.Logger
 
 	// Set output
-	output := os.Stdout
+	var output io.Writer = os.Stdout
+	var closer io.Closer
+	if cfg.Log.Output == "file" {
+		if cfg.Log.FilePath == "" {
+			return zerolog.Logger{}, nil, fmt.Errorf("log.file_path is required when log.output is file")
+		}
+		if err := os.MkdirAll(filepath.Dir(cfg.Log.FilePath), 0755); err != nil {
+			return zerolog.Logger{}, nil, fmt.Errorf("failed to create log directory: %w", err)
+		}
+		file, err := os.OpenFile(cfg.Log.FilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return zerolog.Logger{}, nil, fmt.Errorf("failed to open log file: %w", err)
+		}
+		output = file
+		closer = file
+	}
 	if cfg.Log.Format == "text" {
 		log = zerolog.New(zerolog.ConsoleWriter{Out: output}).With().Timestamp().Logger()
 	} else {
@@ -199,7 +221,7 @@ func setupLogger(cfg *agent.Config) zerolog.Logger {
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	}
 
-	return log
+	return log, closer, nil
 }
 
 func runAgent(cmd *cobra.Command, args []string) error {
@@ -208,15 +230,17 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Validate required config
-	if cfg.Server.DeviceToken == "" {
-		return fmt.Errorf("device token is required (set via --device-token, config file, or FLORA_SERVER_DEVICE_TOKEN)")
-	}
 	if len(cfg.Watch.Paths) == 0 {
 		return fmt.Errorf("at least one watch path is required (set via --watch, config file, or FLORA_WATCH_PATHS)")
 	}
 
-	log := setupLogger(cfg)
+	log, closer, err := setupLogger(cfg)
+	if err != nil {
+		return err
+	}
+	if closer != nil {
+		defer closer.Close()
+	}
 	log.Info().
 		Str("version", version.Short()).
 		Str("server", cfg.Server.URL).
@@ -237,15 +261,17 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Validate required config
-	if cfg.Server.DeviceToken == "" {
-		return fmt.Errorf("device token is required")
-	}
 	if len(cfg.Watch.Paths) == 0 {
 		return fmt.Errorf("at least one watch path is required")
 	}
 
-	log := setupLogger(cfg)
+	log, closer, err := setupLogger(cfg)
+	if err != nil {
+		return err
+	}
+	if closer != nil {
+		defer closer.Close()
+	}
 	log.Info().Msg("running one-time sync")
 
 	// Initialize components
@@ -255,9 +281,16 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 	defer st.Close()
 
-	client := api.NewClient(cfg.Server.URL, cfg.Server.DeviceToken)
+	deviceToken, err := agent.ResolveDeviceToken(context.Background(), cfg, st, log)
+	if err != nil {
+		return fmt.Errorf("failed to resolve device token: %w", err)
+	}
+	client := api.NewClient(cfg.Server.URL, deviceToken)
 	v := validator.New(log)
-	u := uploader.New(client, cfg.Upload.Concurrent, cfg.Upload.ChunkSize, log)
+	u := uploader.New(client, cfg.Upload.Concurrent, cfg.Upload.ChunkSize, log,
+		uploader.WithRetryConfig(retry.Config{MaxAttempts: cfg.Upload.RetryAttempts, InitialDelay: cfg.Upload.RetryDelay, MaxDelay: cfg.Upload.RetryDelay, Multiplier: 1}),
+		uploader.WithBandwidthLimit(cfg.Upload.BandwidthLimit),
+	)
 
 	w, err := watcher.New(cfg.Watch.Paths, cfg.Watch.Patterns.Include, cfg.Watch.Patterns.Exclude, log)
 	if err != nil {

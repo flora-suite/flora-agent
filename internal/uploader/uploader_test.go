@@ -33,6 +33,25 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, int64(10*1024*1024), u.chunkSize)
 }
 
+func TestNew_AppliesRetryAndBandwidthOptions(t *testing.T) {
+	u := New(api.NewClient("https://api.flora.fan", "token"), 2, 1024, zerolog.Nop(),
+		WithRetryConfig(retry.Config{MaxAttempts: 3, InitialDelay: 2 * time.Second, MaxDelay: 2 * time.Second, Multiplier: 1}),
+		WithBandwidthLimit(2048),
+	)
+	assert.Equal(t, 3, u.retryCfg.MaxAttempts)
+	assert.Equal(t, 2*time.Second, u.retryCfg.InitialDelay)
+	require.NotNil(t, u.limiter)
+	assert.Equal(t, int64(2048), u.limiter.bytesPerSecond)
+}
+
+func TestBandwidthLimiterPacesSharedPayloads(t *testing.T) {
+	limiter := &bandwidthLimiter{bytesPerSecond: 100}
+	require.NoError(t, limiter.Wait(context.Background(), 10))
+	start := time.Now()
+	require.NoError(t, limiter.Wait(context.Background(), 10))
+	assert.GreaterOrEqual(t, time.Since(start), 80*time.Millisecond)
+}
+
 func TestHTTPUploader_Upload_SimpleUpload(t *testing.T) {
 	// Create a small test file (under chunk size)
 	tmpDir := t.TempDir()
