@@ -3,8 +3,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/flora-suite/flora-agent/internal/agent"
 	"github.com/flora-suite/flora-agent/internal/api"
+	"github.com/flora-suite/flora-agent/internal/health"
 	"github.com/flora-suite/flora-agent/internal/register"
 	"github.com/flora-suite/flora-agent/internal/retry"
 	"github.com/flora-suite/flora-agent/internal/store"
@@ -78,6 +81,14 @@ var versionCmd = &cobra.Command{
 	},
 }
 
+var statusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show agent health and local sync status",
+	Long: `Show the running agent's health (when enabled), service state, and the
+local recording-file queue stored in SQLite. This command is read-only.`,
+	RunE: runStatus,
+}
+
 var registerCmd = &cobra.Command{
 	Use:   "register",
 	Short: "Register this device with flora-server",
@@ -118,12 +129,16 @@ func init() {
 	registerCmd.Flags().Bool("install-service", false, "automatically install system service")
 	registerCmd.Flags().String("service-type", "", "service type: systemd, launchd (default: auto-detect)")
 
+	// Status command flags
+	statusCmd.Flags().Duration("timeout", 2*time.Second, "health endpoint request timeout")
+
 	// Add commands
 	configCmd.AddCommand(configValidateCmd)
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(syncCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(registerCmd)
 }
 
@@ -438,6 +453,112 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Upload Enabled: %v\n", cfg.Upload.Enabled)
 	fmt.Printf("  DB Path: %s\n", cfg.Storage.DBPath)
 
+	return nil
+}
+
+func runStatus(cmd *cobra.Command, args []string) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Flora Agent Status")
+	fmt.Println("==================")
+
+	printServiceStatus()
+	printHealthStatus(cfg, cmd)
+	if err := printQueueStatus(cfg.Storage.DBPath); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func printServiceStatus() {
+	installer := register.NewServiceInstaller("")
+	serviceType := register.DetectServiceType()
+	if serviceType == register.ServiceTypeNone {
+		fmt.Println("Service: unsupported platform")
+		return
+	}
+
+	if _, err := os.Stat(installer.ServiceFilePath()); os.IsNotExist(err) {
+		fmt.Printf("Service: not installed (%s)\n", serviceType)
+		return
+	}
+	if installer.IsRunning() {
+		fmt.Printf("Service: running (%s)\n", serviceType)
+		return
+	}
+	fmt.Printf("Service: stopped (%s)\n", serviceType)
+}
+
+func printHealthStatus(cfg *agent.Config, cmd *cobra.Command) {
+	if !cfg.Health.Enabled {
+		fmt.Println("Health: disabled")
+		return
+	}
+
+	timeout, _ := cmd.Flags().GetDuration("timeout")
+	client := &http.Client{Timeout: timeout}
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", cfg.Health.Port, cfg.Health.Path)
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Printf("Health: unavailable (%v)\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var healthResponse health.Response
+	if err := json.NewDecoder(resp.Body).Decode(&healthResponse); err != nil {
+		fmt.Printf("Health: unavailable (invalid response: %v)\n", err)
+		return
+	}
+
+	fmt.Printf("Health: %s (uptime %s)\n", healthResponse.Status, healthResponse.Uptime)
+	for _, component := range []string{"database", "server", "watcher"} {
+		if status, ok := healthResponse.Components[component]; ok {
+			if status.Message != "" {
+				fmt.Printf("  %s: %s (%s)\n", component, status.Status, status.Message)
+			} else {
+				fmt.Printf("  %s: %s\n", component, status.Status)
+			}
+		}
+	}
+}
+
+func printQueueStatus(dbPath string) error {
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		fmt.Printf("Queue: not initialized (database not found at %s)\n", dbPath)
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to access status database: %w", err)
+	}
+
+	st, err := store.OpenSQLiteReadOnly(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open status database: %w", err)
+	}
+	defer st.Close()
+
+	states := []store.FileState{
+		store.StateDiscovered,
+		store.StateValidating,
+		store.StateValidated,
+		store.StateUploading,
+		store.StateUploaded,
+		store.StateInvalid,
+		store.StateFailed,
+	}
+
+	fmt.Println("Queue:")
+	for _, state := range states {
+		files, err := st.GetFilesByState(state)
+		if err != nil {
+			return fmt.Errorf("failed to read %s files: %w", state, err)
+		}
+		fmt.Printf("  %s: %d\n", state, len(files))
+	}
 	return nil
 }
 

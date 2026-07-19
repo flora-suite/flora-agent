@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -122,6 +123,26 @@ func NewSQLite(dbPath string) (*SQLiteStore, error) {
 	}
 
 	return store, nil
+}
+
+// OpenSQLiteReadOnly opens an existing state database without applying schema
+// migrations. It is intended for inspection commands that must not alter agent
+// state.
+func OpenSQLiteReadOnly(dbPath string) (*SQLiteStore, error) {
+	dsn := (&url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	return &SQLiteStore{db: db}, nil
 }
 
 func (s *SQLiteStore) migrate() error {

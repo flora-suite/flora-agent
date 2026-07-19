@@ -97,10 +97,10 @@ func (s *ServiceInstaller) Start() error {
 func (s *ServiceInstaller) IsRunning() bool {
 	switch s.serviceType {
 	case ServiceTypeSystemd:
-		err := s.runCommand("systemctl", "is-active", "--quiet", "flora-agent")
+		err := exec.Command("systemctl", "is-active", "--quiet", "flora-agent").Run()
 		return err == nil
 	case ServiceTypeLaunchd:
-		err := s.runCommand("launchctl", "list", "fan.flora.agent")
+		err := exec.Command("launchctl", "list", "fan.flora.agent").Run()
 		return err == nil
 	default:
 		return false
