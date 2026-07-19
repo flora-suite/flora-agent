@@ -35,7 +35,6 @@ cat > "$tap_dir/Formula/flora-agent.rb" <<EOF
 class FloraAgent < Formula
   desc "Edge agent for syncing ROS recording files to Flora"
   homepage "https://github.com/$repository"
-  version "$version"
   license "MIT"
 
   on_macos do
