@@ -37,19 +37,6 @@ cd flora-agent
 make build
 ```
 
-Windows PowerShell:
-
-```powershell
-irm https://raw.githubusercontent.com/flora-suite/flora-agent/main/scripts/install.ps1 | iex
-```
-
-Windows users can also install it through Scoop after adding the Flora bucket:
-
-```powershell
-scoop bucket add flora-suite https://github.com/flora-suite/scoop-flora
-scoop install flora-agent
-```
-
 ### Configuration
 
 ```bash
@@ -142,7 +129,6 @@ make docker-build    # Build Docker image
 |----------|-------------|--------|
 | Linux | amd64, arm64, armv7 | ✅ Primary |
 | macOS | amd64, arm64 | ✅ Supported |
-| Windows | amd64, arm64 | ⚠️ Experimental |
 
 ## Supported File Formats
 
