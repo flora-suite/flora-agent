@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        env:
+          REF_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must use vX.Y.Z format." >&2
+            exit 1
+          fi
+          echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            extension: tar.gz
+          - goos: linux
+            goarch: arm64
+            extension: tar.gz
+          - goos: darwin
+            goarch: amd64
+            extension: tar.gz
+          - goos: darwin
+            goarch: arm64
+            extension: tar.gz
+          - goos: windows
+            goarch: amd64
+            extension: zip
+          - goos: windows
+            goarch: arm64
+            extension: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build archive
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -eu
+          module=$(go list -m -f '{{.Path}}')
+          build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          binary=flora-agent
+          if [ "$GOOS" = windows ]; then binary="$binary.exe"; fi
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X $module/pkg/version.Version=$VERSION -X $module/pkg/version.Commit=$COMMIT -X $module/pkg/version.BuildDate=$build_date" -o "$binary" ./cmd/flora-agent
+          archive="flora-agent_${VERSION}_${GOOS}_${GOARCH}.${{ matrix.extension }}"
+          if [ "${{ matrix.extension }}" = tar.gz ]; then
+            tar -czf "$archive" "$binary"
+          else
+            zip -q "$archive" "$binary"
+          fi
+          mkdir -p dist
+          mv "$archive" dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum flora-agent_* > checksums.txt
+      - id: publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    needs: [prepare, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check tap token
+        id: token
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$TAP_TOKEN" ]; then echo "configured=true" >> "$GITHUB_OUTPUT"; else echo "configured=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.configured == 'true'
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.configured == 'true'
+        with:
+          repository: flora-suite/homebrew-flora
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-flora
+      - name: Update formula
+        if: steps.token.outputs.configured == 'true'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          scripts/update-homebrew-formula.sh homebrew-flora "$VERSION"
+          cd homebrew-flora
+          git config user.name "flora-suite-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/flora-agent.rb
+          git diff --cached --quiet || git commit -m "flora-agent $VERSION"
+          git push
+      - name: Report missing token
+        if: steps.token.outputs.configured != 'true'
+        run: echo "HOMEBREW_TAP_TOKEN is not configured; skipping formula synchronization."
+
+  update-scoop:
+    needs: [prepare, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check bucket token
+        id: token
+        env:
+          BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          if [ -n "$BUCKET_TOKEN" ]; then echo "configured=true" >> "$GITHUB_OUTPUT"; else echo "configured=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.configured == 'true'
+      - uses: actions/checkout@v4
+        if: steps.token.outputs.configured == 'true'
+        with:
+          repository: flora-suite/scoop-flora
+          token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          path: scoop-flora
+      - name: Update manifest
+        if: steps.token.outputs.configured == 'true'
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          scripts/update-scoop-manifest.sh scoop-flora "$VERSION"
+          cd scoop-flora
+          git config user.name "flora-suite-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/flora-agent.json
+          git diff --cached --quiet || git commit -m "flora-agent $VERSION"
+          git push
+      - name: Report missing token
+        if: steps.token.outputs.configured != 'true'
+        run: echo "SCOOP_BUCKET_TOKEN is not configured; skipping Scoop synchronization."
