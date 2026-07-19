@@ -23,10 +23,16 @@ The workflow injects the release version, commit SHA, and UTC build date into
 
 ## Package repository synchronization
 
-Every release, including pre-releases, updates this public repository after a
-successful release:
+Every release updates the Homebrew tap after a successful release, using a
+separate Formula channel:
 
-- Homebrew Formula: `flora-suite/homebrew-flora`, `Formula/flora-agent.rb`
+- Stable tags update `flora-suite/homebrew-flora`, `Formula/flora-agent.rb`.
+- Pre-release tags update `flora-suite/homebrew-flora`,
+  `Formula/flora-agent@rc.rb`. This Formula is keg-only, so it cannot replace
+  the stable executable without an explicit `brew link --overwrite flora-agent@rc`.
+
+Users install the stable channel with `brew install flora-agent`. To opt into a
+release candidate, they must explicitly run `brew install flora-agent@rc`.
 
 Configure these repository secrets in `flora-suite/flora-agent` before the first
 release:
@@ -42,5 +48,6 @@ it once the secret is configured.
 The updater scripts can also be run locally after a release exists:
 
 ```bash
-scripts/update-homebrew-formula.sh /path/to/homebrew-flora 0.1.0
+scripts/update-homebrew-formula.sh /path/to/homebrew-flora 0.1.0 stable
+scripts/update-homebrew-formula.sh /path/to/homebrew-flora 0.1.0-rc.2 rc
 ```
