@@ -36,6 +36,14 @@ func TestRegistrationServerURLUsesExplicitValueWithoutWarning(t *testing.T) {
 	assert.Empty(t, stderr.String())
 }
 
+func TestServiceCommandsAreRegistered(t *testing.T) {
+	for _, commandName := range []string{"start", "stop", "restart"} {
+		command, _, err := rootCmd.Find([]string{commandName})
+		require.NoError(t, err)
+		assert.Equal(t, commandName, command.Name())
+	}
+}
+
 func TestSetupLoggerWritesToConfiguredFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "logs", "agent.log")
 	log, closer, err := setupLogger(&agent.Config{Log: agent.LogConfig{Output: "file", FilePath: path, Format: "json"}})

@@ -89,6 +89,30 @@ local recording-file queue stored in SQLite. This command is read-only.`,
 	RunE: runStatus,
 }
 
+var startCmd = &cobra.Command{
+	Use:   "start",
+	Short: "Start the agent system service",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runServiceAction("start")
+	},
+}
+
+var stopCmd = &cobra.Command{
+	Use:   "stop",
+	Short: "Stop the agent system service",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runServiceAction("stop")
+	},
+}
+
+var restartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Restart the agent system service",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runServiceAction("restart")
+	},
+}
+
 var registerCmd = &cobra.Command{
 	Use:   "register",
 	Short: "Register this device with flora-server",
@@ -139,6 +163,9 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(startCmd)
+	rootCmd.AddCommand(stopCmd)
+	rootCmd.AddCommand(restartCmd)
 	rootCmd.AddCommand(registerCmd)
 }
 
@@ -482,7 +509,7 @@ func printServiceStatus() {
 		return
 	}
 
-	if _, err := os.Stat(installer.ServiceFilePath()); os.IsNotExist(err) {
+	if !installer.IsInstalled() {
 		fmt.Printf("Service: not installed (%s)\n", serviceType)
 		return
 	}
@@ -491,6 +518,34 @@ func printServiceStatus() {
 		return
 	}
 	fmt.Printf("Service: stopped (%s)\n", serviceType)
+}
+
+func runServiceAction(action string) error {
+	installer := register.NewServiceInstaller("")
+	if register.DetectServiceType() == register.ServiceTypeNone {
+		return fmt.Errorf("service management is not supported on this platform")
+	}
+	if !installer.IsInstalled() {
+		return fmt.Errorf("flora-agent service is not installed; run `flora-agent register --install-service` first")
+	}
+
+	var err error
+	switch action {
+	case "start":
+		err = installer.Start()
+	case "stop":
+		err = installer.Stop()
+	case "restart":
+		err = installer.Restart()
+	default:
+		return fmt.Errorf("unknown service action: %s", action)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to %s flora-agent service: %w", action, err)
+	}
+
+	fmt.Printf("Flora Agent service %sed\n", action)
+	return nil
 }
 
 func printHealthStatus(cfg *agent.Config, cmd *cobra.Command) {
