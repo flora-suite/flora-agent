@@ -110,10 +110,62 @@ jobs:
       - name: Create checksums
         working-directory: dist
         run: sha256sum flora-agent_* > checksums.txt
+      - name: Create release notes
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          {
+            echo "## Flora Agent ${VERSION}"
+            echo
+            if [ "$PRERELEASE" = "true" ]; then
+              echo "> This is a pre-release for testing. It does not update the Homebrew or Scoop installation channels."
+            else
+              echo "> This is a stable release."
+            fi
+            echo
+            echo "### Install"
+            echo
+            echo "**Linux and macOS**"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://raw.githubusercontent.com/flora-suite/flora-agent/${TAG}/scripts/install.sh | sh"
+            echo '```'
+            echo
+            echo "**Windows PowerShell**"
+            echo
+            echo '```powershell'
+            echo "irm https://raw.githubusercontent.com/flora-suite/flora-agent/${TAG}/scripts/install.ps1 | iex"
+            echo '```'
+            echo
+            echo "### Package managers"
+            echo
+            echo '```sh'
+            echo "brew tap flora-suite/flora"
+            echo "brew install flora-agent"
+            echo '```'
+            echo
+            echo '```powershell'
+            echo "scoop bucket add flora-suite https://github.com/flora-suite/scoop-flora"
+            echo "scoop install flora-agent"
+            echo '```'
+            echo
+            echo "### Release assets"
+            echo
+            echo "- Linux: \`flora-agent_${VERSION}_linux_amd64.tar.gz\`, \`flora-agent_${VERSION}_linux_arm64.tar.gz\`"
+            echo "- macOS: \`flora-agent_${VERSION}_darwin_amd64.tar.gz\`, \`flora-agent_${VERSION}_darwin_arm64.tar.gz\`"
+            echo "- Windows: \`flora-agent_${VERSION}_windows_amd64.zip\`, \`flora-agent_${VERSION}_windows_arm64.zip\`"
+            echo "- SHA-256 checksums: \`checksums.txt\`"
+            echo
+            echo "Verify downloads against \`checksums.txt\` before installing manually."
+          } > "$RUNNER_TEMP/release-notes.md"
       - id: publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Flora Agent ${{ needs.prepare.outputs.version }}
+          body_path: ${{ runner.temp }}/release-notes.md
           generate_release_notes: true
           prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
           files: dist/*
