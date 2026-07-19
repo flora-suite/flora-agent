@@ -139,6 +139,31 @@ func TestSQLiteStore_MigratesIncompleteUploadsToDiscovery(t *testing.T) {
 	assert.Empty(t, chunks)
 }
 
+func TestOpenSQLiteReadOnlyDoesNotMigrateState(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agent.db")
+	writer, err := NewSQLite(dbPath)
+	require.NoError(t, err)
+
+	file := &File{ID: "recording.mcap", Path: "/data/recording.mcap", Size: 1, MTime: 1, State: StateUploading, UploadID: "upload-1"}
+	require.NoError(t, writer.UpsertFile(file))
+	require.NoError(t, writer.UpsertChunk(&UploadChunk{FileID: file.ID, ChunkIndex: 0, Size: 1, Uploaded: true}))
+	_, err = writer.db.Exec("DELETE FROM config WHERE key = 'schema_version'")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	reader, err := OpenSQLiteReadOnly(dbPath)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	files, err := reader.GetFilesByState(StateUploading)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, "upload-1", files[0].UploadID)
+	chunks, err := reader.GetChunks(file.ID)
+	require.NoError(t, err)
+	assert.Len(t, chunks, 1)
+}
+
 func TestSQLiteStore_UpsertFile_WithMetadata(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
