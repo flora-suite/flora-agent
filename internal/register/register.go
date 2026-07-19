@@ -11,19 +11,22 @@ import (
 	"github.com/flora-suite/flora-agent/internal/api"
 )
 
+// DefaultServerURL is the public Flora API used when a registration server is not specified.
+const DefaultServerURL = "https://api.flora.fan"
+
 // Options contains configuration for the registration process.
 type Options struct {
-	ServerURL     string
-	OutputPath    string
-	NoService     bool
+	ServerURL      string
+	OutputPath     string
+	NoService      bool
 	InstallService bool
-	ServiceType   string
+	ServiceType    string
 }
 
 // DefaultOptions returns default registration options.
 func DefaultOptions() *Options {
 	return &Options{
-		ServerURL:      "https://api.flora.fan",
+		ServerURL:      DefaultServerURL,
 		OutputPath:     DefaultConfigPath(),
 		NoService:      false,
 		InstallService: false,

@@ -96,10 +96,15 @@ Key settings:
 ```bash
 flora-agent run              # Run the agent daemon
 flora-agent sync             # One-time sync and exit
+flora-agent register --server https://api.flora.fan  # Register with an explicit API URL
 flora-agent config validate  # Validate configuration
 flora-agent version          # Show version info
 flora-agent --help           # Show help
 ```
+
+`flora-agent register` warns when `--server` is omitted and falls back to
+`https://api.flora.fan`. Always pass `--server` when registering against a
+self-hosted Flora server.
 
 ## Docker
 

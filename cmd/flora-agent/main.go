@@ -112,7 +112,7 @@ func init() {
 	viper.BindPFlag("server.device_token", runCmd.Flags().Lookup("device-token"))
 
 	// Register command flags
-	registerCmd.Flags().String("server", "https://api.flora.fan", "flora-server URL")
+	registerCmd.Flags().String("server", "", "flora-server API URL (recommended for self-hosted servers)")
 	registerCmd.Flags().String("output", "", "config file output path (default: auto-detect)")
 	registerCmd.Flags().Bool("no-service", false, "skip service installation prompt")
 	registerCmd.Flags().Bool("install-service", false, "automatically install system service")
@@ -449,7 +449,7 @@ func min(a, b int) int {
 }
 
 func runRegister(cmd *cobra.Command, args []string) error {
-	serverURL, _ := cmd.Flags().GetString("server")
+	serverURL := registrationServerURL(cmd)
 	outputPath, _ := cmd.Flags().GetString("output")
 	noService, _ := cmd.Flags().GetBool("no-service")
 	installService, _ := cmd.Flags().GetBool("install-service")
@@ -467,4 +467,15 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	opts.ServiceType = serviceType
 
 	return register.Run(opts)
+}
+
+func registrationServerURL(cmd *cobra.Command) string {
+	serverURL, _ := cmd.Flags().GetString("server")
+	serverURL = strings.TrimSpace(serverURL)
+	if serverURL != "" {
+		return serverURL
+	}
+
+	fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: --server was not provided; using the default API URL %s. To register with a self-hosted server, pass --server https://your-server.example.\n", register.DefaultServerURL)
+	return register.DefaultServerURL
 }
