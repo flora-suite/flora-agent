@@ -126,7 +126,11 @@ jobs:
             echo
             echo '```sh'
             echo "brew tap flora-suite/flora"
-            echo "brew install flora-agent"
+            if [ "$PRERELEASE" = "true" ]; then
+              echo "brew install flora-agent@rc"
+            else
+              echo "brew install flora-agent"
+            fi
             echo '```'
             echo
             echo "### Release assets"
@@ -172,13 +176,20 @@ jobs:
         if: steps.token.outputs.configured == 'true'
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         run: |
-          scripts/update-homebrew-formula.sh homebrew-flora "$VERSION"
+          formula=stable
+          formula_name=flora-agent
+          if [ "$PRERELEASE" = "true" ]; then
+            formula=rc
+            formula_name=flora-agent@rc
+          fi
+          scripts/update-homebrew-formula.sh homebrew-flora "$VERSION" "$formula"
           cd homebrew-flora
           git config user.name "flora-suite-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/flora-agent.rb
-          git diff --cached --quiet || git commit -m "flora-agent $VERSION"
+          git add "Formula/$formula_name.rb"
+          git diff --cached --quiet || git commit -m "$formula_name $VERSION"
           git push
       - name: Report missing token
         if: steps.token.outputs.configured != 'true'
