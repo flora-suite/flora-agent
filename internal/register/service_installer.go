@@ -93,6 +93,43 @@ func (s *ServiceInstaller) Start() error {
 	}
 }
 
+// Stop stops the installed service.
+func (s *ServiceInstaller) Stop() error {
+	switch s.serviceType {
+	case ServiceTypeSystemd:
+		return s.runCommand("systemctl", "stop", "flora-agent")
+	case ServiceTypeLaunchd:
+		return s.runCommand("launchctl", "unload", "-w", s.launchdPlistPath())
+	default:
+		return fmt.Errorf("no supported init system found")
+	}
+}
+
+// Restart restarts the installed service.
+func (s *ServiceInstaller) Restart() error {
+	switch s.serviceType {
+	case ServiceTypeSystemd:
+		return s.runCommand("systemctl", "restart", "flora-agent")
+	case ServiceTypeLaunchd:
+		if err := s.Stop(); err != nil {
+			return err
+		}
+		return s.Start()
+	default:
+		return fmt.Errorf("no supported init system found")
+	}
+}
+
+// IsInstalled reports whether the service definition exists on disk.
+func (s *ServiceInstaller) IsInstalled() bool {
+	serviceFilePath := s.ServiceFilePath()
+	if serviceFilePath == "" {
+		return false
+	}
+	_, err := os.Stat(serviceFilePath)
+	return err == nil
+}
+
 // IsRunning checks if the service is running.
 func (s *ServiceInstaller) IsRunning() bool {
 	switch s.serviceType {

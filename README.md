@@ -85,6 +85,9 @@ flora-agent run              # Run the agent daemon
 flora-agent sync             # One-time sync and exit
 flora-agent register --server https://api.flora.fan  # Register with an explicit API URL
 flora-agent status           # Show health, service, and sync-queue status
+flora-agent start            # Start the installed system service
+flora-agent stop             # Stop the installed system service
+flora-agent restart          # Restart the installed system service
 flora-agent config validate  # Validate configuration
 flora-agent version          # Show version info
 flora-agent --help           # Show help
@@ -98,6 +101,10 @@ self-hosted Flora server.
 enabled, reports the installed system service state, and summarizes the local
 SQLite queue by processing state. Use `--timeout` to adjust the health request
 timeout (default: 2 seconds).
+
+`flora-agent start`, `stop`, and `restart` manage the service installed by
+`flora-agent register --install-service`. On Linux they use systemd; on macOS
+they use launchd.
 
 ## Docker
 
