@@ -23,7 +23,8 @@ The workflow injects the release version, commit SHA, and UTC build date into
 
 ## Package repository synchronization
 
-Stable releases update this public repository after a successful release:
+Every release, including pre-releases, updates this public repository after a
+successful release:
 
 - Homebrew Formula: `flora-suite/homebrew-flora`, `Formula/flora-agent.rb`
 
@@ -37,9 +38,6 @@ release:
 If the secret is absent, the GitHub Release still succeeds and the package
 repository update is deliberately skipped. The next tag release will synchronize
 it once the secret is configured.
-
-Pre-releases never update Homebrew, ensuring preview builds cannot
-replace the stable installation channels.
 
 The updater scripts can also be run locally after a release exists:
 

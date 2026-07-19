@@ -109,7 +109,7 @@ jobs:
             echo "## Flora Agent ${VERSION}"
             echo
             if [ "$PRERELEASE" = "true" ]; then
-              echo "> This is a pre-release for testing. It does not update the Homebrew installation channel."
+              echo "> This is a pre-release for testing."
             else
               echo "> This is a stable release."
             fi
@@ -151,7 +151,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   update-homebrew:
-    if: needs.prepare.outputs.prerelease != 'true'
     needs: [prepare, release]
     runs-on: ubuntu-latest
     steps:
